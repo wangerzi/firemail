@@ -1,6 +1,11 @@
 # --- Frontend Builder Stage ---
 FROM node:22-alpine AS frontend-builder
 
+# 配置国内 npm 源为淘宝镜像
+RUN npm config set registry https://registry.npmmirror.com && \
+    corepack enable pnpm && \
+    pnpm config set registry https://registry.npmmirror.com
+
 # Copy frontend files
 COPY frontend /app/frontend
 
@@ -14,6 +19,11 @@ RUN corepack enable pnpm && \
 # --- Python Dependencies Stage ---
 FROM python:3.10.17-slim-bullseye AS python-deps
 
+# Set custom APT sources
+RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list
+
+
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -22,6 +32,9 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements file
 COPY backend/requirements.txt /requirements.txt
+
+# 设置国内清华 pip 源
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r /requirements.txt
@@ -38,14 +51,21 @@ ENV HOST=0.0.0.0 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Set custom APT sources
+RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list
+
+
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     curl \
     bash \
     && rm -rf /var/lib/apt/lists/*
 
+
 # Install Caddy using binary download
-RUN curl -L "https://github.com/caddyserver/caddy/releases/download/v2.7.6/caddy_2.7.6_linux_amd64.tar.gz" -o caddy.tar.gz \
+#RUN curl -L "https://github.com/caddyserver/caddy/releases/download/v2.7.6/caddy_2.7.6_linux_amd64.tar.gz" -o caddy.tar.gz \
+RUN curl -L "https://webstatic.wj2015.com/caddy_2.7.6_linux_amd64.tar.gz" -o caddy.tar.gz \
     && tar -xzf caddy.tar.gz \
     && mv caddy /usr/local/bin/ \
     && chmod +x /usr/local/bin/caddy \
