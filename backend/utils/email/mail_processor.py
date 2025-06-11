@@ -12,6 +12,7 @@ import time
 import traceback
 import concurrent.futures
 import queue
+import json
 
 from .common import (
     decode_mime_words,
@@ -66,26 +67,41 @@ class MailProcessor:
 
     @staticmethod
     @timing_decorator
-    def save_mail_records(db, email_id: int, mail_records: List[Dict], progress_callback: Optional[Callable] = None) -> int:
-        """保存邮件记录到数据库"""
-        saved_count = 0
+    def save_mail_records(db, email_id: int, mail_records: List[Dict], progress_callback: Optional[Callable] = None, max_workers: int = 4) -> int:
+        """保存邮件记录到数据库 - 多线程并发版本"""
         total = len(mail_records)
-
-        logger.info(f"开始保存 {total} 封邮件记录到数据库, 邮箱ID: {email_id}")
+        logger.info(f"Starting to save {total} mail records to database, Email ID: {email_id}, max_workers: {max_workers}")
 
         if not progress_callback:
             progress_callback = lambda progress, message: None
 
-        for i, record in enumerate(mail_records):
-            try:
-                # 更新进度
-                progress = int((i + 1) / total * 100)
-                progress_message = f"正在保存邮件记录 ({i + 1}/{total})"
+        # 线程安全的计数器和进度跟踪
+        saved_count = threading.BoundedSemaphore(1)
+        saved_count.acquire()
+        saved_count_value = [0]  # 使用列表来保持引用
+        saved_count.release()
+        
+        progress_lock = threading.Lock()
+        processed_count = [0]
+        
+        def update_progress():
+            """线程安全的进度更新"""
+            with progress_lock:
+                processed_count[0] += 1
+                progress = int(processed_count[0] / total * 100)
+                progress_message = f"Processing mail records ({processed_count[0]}/{total})"
                 progress_callback(progress, progress_message)
-
-                if i % 10 == 0 or i == total - 1:  # 每10封记录一次进度
+                
+                # 每10封或最后一封记录进度
+                if processed_count[0] % 10 == 0 or processed_count[0] == total:
                     log_progress(email_id, progress, progress_message)
 
+        def process_single_record(record_data):
+            """处理单条邮件记录的函数"""
+            record, index = record_data
+            current_saved = 0
+            
+            try:
                 # 检查邮件是否已存在
                 subject = record.get("subject", "(无主题)")
                 sender = record.get("sender", "(未知发件人)")
@@ -146,20 +162,45 @@ class MailProcessor:
                                 except Exception as e:
                                     logger.error(f"保存附件失败: {str(e)}")
                                     continue
-                        saved_count += 1
-                        logger.debug(f"邮件记录保存成功: '{subject[:30]}...'")
+                        
+                        current_saved = 1
+                        logger.debug(f"Mail record saved successfully: '{subject[:30]}...'")
                     else:
-                        logger.warning(f"邮件记录保存失败: '{subject[:30]}...'")
+                        logger.warning(f"Failed to save mail record: '{subject[:30]}...'")
                 else:
-                    logger.debug(f"邮件记录已存在: '{subject[:30]}...'")
+                    logger.debug(f"Mail record already exists: '{subject[:30]}...'")
 
             except Exception as e:
-                logger.error(f"保存邮件记录失败: {str(e)}")
+                logger.error(f"Failed to save mail record: {str(e)}")
                 traceback.print_exc()
-                continue
+            finally:
+                # 更新进度
+                update_progress()
+                
+            return current_saved
 
-        logger.info(f"完成保存邮件记录: 总计 {total} 封, 新增 {saved_count} 封")
-        return saved_count
+        # 使用ThreadPoolExecutor进行并发处理
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 准备数据：为每个记录添加索引
+            record_data = [(record, i) for i, record in enumerate(mail_records)]
+            
+            # 提交所有任务
+            futures = [executor.submit(process_single_record, data) for data in record_data]
+            
+            # 收集结果
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    if result > 0:
+                        with progress_lock:
+                            saved_count_value[0] += result
+                except Exception as e:
+                    logger.error(f"Error in concurrent processing: {str(e)}")
+                    traceback.print_exc()
+
+        final_saved_count = saved_count_value[0]
+        logger.info(f"Completed saving mail records: Total {total}, New {final_saved_count}")
+        return final_saved_count
 
     @staticmethod
     def update_check_time(db, email_id: int) -> bool:
@@ -175,8 +216,9 @@ class MailProcessor:
 class EmailBatchProcessor:
     """批量邮件处理类"""
 
-    def __init__(self, db, max_workers=5):
+    def __init__(self, db, max_workers=5, mail_save_workers=8):
         self.db = db
+        self.mail_save_workers = mail_save_workers  # 邮件保存专用线程数
         self.processing_emails = {}
         self.lock = threading.Lock()
         # 创建两个独立的线程池
@@ -223,9 +265,9 @@ class EmailBatchProcessor:
         """更新邮件检查时间"""
         return MailProcessor.update_check_time(db, email_id)
 
-    def save_mail_records(self, db, email_id: int, mail_records: List[Dict], progress_callback: Optional[Callable] = None) -> int:
-        """保存邮件记录到数据库"""
-        return MailProcessor.save_mail_records(db, email_id, mail_records, progress_callback)
+    def save_mail_records(self, db, email_id: int, mail_records: List[Dict], progress_callback: Optional[Callable] = None, max_workers: int = 4) -> int:
+        """保存邮件记录到数据库 - 支持多线程并发"""
+        return MailProcessor.save_mail_records(db, email_id, mail_records, progress_callback, max_workers)
 
     def check_emails(self, email_ids: List[int], progress_callback: Optional[Callable] = None, is_realtime: bool = False) -> bool:
         """批量检查邮箱邮件"""
@@ -353,7 +395,7 @@ class EmailBatchProcessor:
 
                     # 保存邮件记录，传递邮件键列表用于高效去重
                     mail_keys = [record.get('mail_key', '') for record in mail_records if 'mail_key' in record]
-                    saved_count = self.save_mail_records(self.db, email_id, mail_records, callback)
+                    saved_count = self.save_mail_records(self.db, email_id, mail_records, callback, self.mail_save_workers)
 
                     # 更新最后检查时间
                     self.update_check_time(self.db, email_id)
@@ -414,9 +456,9 @@ class EmailBatchProcessor:
                         self.update_check_time(self.db, email_id)
 
                         return {'success': True, 'message': '没有找到新邮件'}
-
+                    
                     # 保存邮件记录
-                    saved_count = self.save_mail_records(self.db, email_id, mail_records, callback)
+                    saved_count = self.save_mail_records(self.db, email_id, mail_records, callback, self.mail_save_workers)
 
                     # 更新最后检查时间
                     self.update_check_time(self.db, email_id)

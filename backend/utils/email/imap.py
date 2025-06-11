@@ -16,6 +16,8 @@ import ssl
 import time
 import traceback
 from typing import List, Dict, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
 
 from .common import (
     decode_mime_words,
@@ -170,9 +172,96 @@ class IMAPMailHandler:
             self.mail = None
 
     @staticmethod
+    def _process_email_batch(email_address, password, server, port, use_ssl, folder, message_numbers, search_criteria, progress_queue, result_queue, thread_id):
+        """处理一批邮件的工作函数"""
+        mail = None
+        processed_emails = []
+        
+        try:
+            # 为每个线程创建独立的IMAP连接
+            if use_ssl:
+                mail = imaplib.IMAP4_SSL(server, port)
+            else:
+                mail = imaplib.IMAP4(server, port)
+            
+            mail.login(email_address, password)
+            mail.select(folder)
+            
+            # 处理分配给这个线程的邮件
+            for i, num in enumerate(message_numbers):
+                try:
+                    # 发送进度更新
+                    progress_queue.put(('progress', thread_id, i + 1, len(message_numbers)))
+                    
+                    # 获取邮件头信息，用于提前判断是否已存在
+                    _, header_data = mail.fetch(num, '(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])')
+                    msg_header = email.message_from_bytes(header_data[0][1])
+
+                    subject = decode_mime_words(msg_header.get("subject", "")) if msg_header.get("subject") else "(无主题)"
+                    sender = decode_mime_words(msg_header.get("from", "")) if msg_header.get("from") else "(未知发件人)"
+                    date_str = msg_header.get("date", "")
+                    received_time = parse_email_date(date_str) if date_str else datetime.now()
+
+                    # 创建一个唯一标识用于检查邮件是否已存在
+                    mail_key = f"{subject}|{sender}|{received_time.isoformat()}"
+
+                    # 获取完整邮件内容
+                    _, msg_data = mail.fetch(num, '(RFC822)')
+                    email_body = msg_data[0][1]
+
+                    # 尝试使用标准方式解析邮件
+                    try:
+                        msg = email.message_from_bytes(email_body)
+                        mail_record = parse_email_message(msg, folder)
+                    except Exception as e:
+                        logger.warning(f"Thread {thread_id}: 标准方式解析邮件失败，尝试使用EML解析器: {str(e)}")
+                        mail_record = None
+
+                    # 如果标准解析失败，尝试使用EML解析器
+                    if not mail_record:
+                        try:
+                            from .file_parser import EmailFileParser
+                            logger.info(f"Thread {thread_id}: 使用EML解析器解析邮件")
+                            mail_record = EmailFileParser.parse_eml_content(email_body)
+                            if mail_record:
+                                # 设置文件夹信息
+                                mail_record['folder'] = folder
+                        except Exception as e:
+                            logger.error(f"Thread {thread_id}: EML解析器解析邮件失败: {str(e)}")
+                            mail_record = None
+
+                    if mail_record:
+                        # 添加一些额外信息用于去重判断
+                        mail_record['mail_key'] = mail_key
+                        processed_emails.append(mail_record)
+                        message_id = mail_record.get('message_id', 'unknown')
+                        subject = mail_record.get('subject', '(无主题)')
+                        logger.debug(f"Thread {thread_id}: 成功处理邮件 {subject[:30]}")
+                    else:
+                        logger.error(f"Thread {thread_id}: 无法解析邮件: {mail_key}")
+
+                except Exception as e:
+                    logger.error(f"Thread {thread_id}: 处理邮件失败: {str(e)}")
+                    continue
+            
+            # 发送完成结果
+            result_queue.put(('success', thread_id, processed_emails))
+            
+        except Exception as e:
+            logger.error(f"Thread {thread_id}: 线程处理失败: {str(e)}")
+            result_queue.put(('error', thread_id, str(e)))
+        finally:
+            if mail:
+                try:
+                    mail.close()
+                    mail.logout()
+                except:
+                    pass
+
+    @staticmethod
     @timing_decorator
     def fetch_emails(email_address, password, server, port=993, use_ssl=True, folder="INBOX", callback=None, last_check_time=None):
-        """获取邮箱中的邮件"""
+        """获取邮箱中的邮件 - 多线程版本"""
         mail_records = []
         mail = None
 
@@ -189,7 +278,7 @@ class IMAPMailHandler:
             else:
                 logger.info(f"获取所有邮件")
 
-            # 连接IMAP服务器
+            # 连接IMAP服务器获取邮件列表
             logger.info(f"连接IMAP服务器 {server}:{port} (SSL: {use_ssl})")
             if callback:
                 callback(0, "正在连接邮箱服务器")
@@ -230,77 +319,101 @@ class IMAPMailHandler:
 
             logger.info(f"找到 {total_messages} 封邮件")
 
-            # 处理每封邮件
-            for i, num in enumerate(message_numbers):
-                try:
-                    # 更新进度
-                    progress = int((i + 1) / total_messages * 100)
-                    if callback:
-                        callback(progress, f"正在处理第 {i + 1}/{total_messages} 封邮件")
-
-                    # 获取邮件头信息，用于提前判断是否已存在
-                    _, header_data = mail.fetch(num, '(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])')
-                    msg_header = email.message_from_bytes(header_data[0][1])
-
-                    subject = decode_mime_words(msg_header.get("subject", "")) if msg_header.get("subject") else "(无主题)"
-                    sender = decode_mime_words(msg_header.get("from", "")) if msg_header.get("from") else "(未知发件人)"
-                    date_str = msg_header.get("date", "")
-                    received_time = parse_email_date(date_str) if date_str else datetime.now()
-
-                    # 创建一个唯一标识用于检查邮件是否已存在
-                    mail_key = f"{subject}|{sender}|{received_time.isoformat()}"
-
-                    # 在这里可以添加检查邮件是否已存在于数据库的代码
-                    # 如果已经有接口可以查询，则直接调用
-                    # 此处仅收集基本信息，稍后在批量处理时进行检查
-
-                    # 获取完整邮件内容
-                    _, msg_data = mail.fetch(num, '(RFC822)')
-                    email_body = msg_data[0][1]
-
-                    # 尝试使用标准方式解析邮件
-                    try:
-                        msg = email.message_from_bytes(email_body)
-                        mail_record = parse_email_message(msg, folder)
-                    except Exception as e:
-                        logger.warning(f"标准方式解析邮件失败，尝试使用EML解析器: {str(e)}")
-                        mail_record = None
-
-                    # 如果标准解析失败，尝试使用EML解析器
-                    if not mail_record:
-                        try:
-                            from .file_parser import EmailFileParser
-                            logger.info("使用EML解析器解析邮件")
-                            mail_record = EmailFileParser.parse_eml_content(email_body)
-                            if mail_record:
-                                # 设置文件夹信息
-                                mail_record['folder'] = folder
-                        except Exception as e:
-                            logger.error(f"EML解析器解析邮件失败: {str(e)}")
-                            mail_record = None
-
-                    if mail_record:
-                        # 添加一些额外信息用于去重判断
-                        mail_record['mail_key'] = mail_key
-                        mail_records.append(mail_record)
-                        message_id = mail_record.get('message_id', 'unknown')
-                        subject = mail_record.get('subject', '(无主题)')
-                        log_message_processing(message_id, i+1, total_messages, subject)
-                    else:
-                        logger.error(f"无法解析邮件: {mail_key}")
-
-                except Exception as e:
-                    logger.error(f"处理邮件失败: {str(e)}")
-                    message_id = 'unknown'
-                    log_message_error(message_id, str(e))
-                    continue
-
-            # 关闭连接
+            # 关闭初始连接，让线程使用独立连接
             mail.close()
             mail.logout()
+            mail = None
+
+            if total_messages == 0:
+                if callback:
+                    callback(100, "没有找到邮件")
+                return mail_records
+
+            # 将邮件分配给8个线程
+            num_threads = min(8, total_messages)  # 如果邮件数少于8个，使用实际邮件数
+            chunk_size = max(1, total_messages // num_threads)
+            
+            # 分割邮件列表
+            message_chunks = []
+            for i in range(0, total_messages, chunk_size):
+                chunk = message_numbers[i:i + chunk_size]
+                if chunk:
+                    message_chunks.append(chunk)
+            
+            # 如果分割后的chunks数量超过8个，合并最后的chunks
+            if len(message_chunks) > num_threads:
+                last_chunks = message_chunks[num_threads-1:]
+                merged_chunk = []
+                for chunk in last_chunks:
+                    merged_chunk.extend(chunk)
+                message_chunks = message_chunks[:num_threads-1] + [merged_chunk]
+
+            logger.info(f"使用 {len(message_chunks)} 个线程并行处理邮件")
+
+            # 创建队列用于线程间通信
+            progress_queue = queue.Queue()
+            result_queue = queue.Queue()
+
+            # 启动线程
+            threads = []
+            for i, chunk in enumerate(message_chunks):
+                thread = threading.Thread(
+                    target=IMAPMailHandler._process_email_batch,
+                    args=(email_address, password, server, port, use_ssl, folder, 
+                          chunk, search_criteria, progress_queue, result_queue, i)
+                )
+                thread.start()
+                threads.append(thread)
+
+            # 监控进度和收集结果
+            completed_threads = 0
+            thread_progress = {i: 0 for i in range(len(threads))}
+            thread_totals = {i: len(message_chunks[i]) for i in range(len(message_chunks))}
+
+            while completed_threads < len(threads):
+                try:
+                    # 检查进度队列
+                    while not progress_queue.empty():
+                        try:
+                            msg_type, thread_id, current, total = progress_queue.get_nowait()
+                            if msg_type == 'progress':
+                                thread_progress[thread_id] = current
+                                
+                                # 计算总体进度
+                                total_processed = sum(thread_progress.values())
+                                overall_progress = int((total_processed / total_messages) * 100)
+                                if callback:
+                                    callback(overall_progress, f"正在处理邮件 {total_processed}/{total_messages} (使用{len(threads)}个线程)")
+                        except queue.Empty:
+                            break
+
+                    # 检查结果队列
+                    while not result_queue.empty():
+                        try:
+                            msg_type, thread_id, data = result_queue.get_nowait()
+                            if msg_type == 'success':
+                                mail_records.extend(data)
+                                logger.info(f"Thread {thread_id}: 成功处理 {len(data)} 封邮件")
+                                completed_threads += 1
+                            elif msg_type == 'error':
+                                logger.error(f"Thread {thread_id}: 处理失败 - {data}")
+                                completed_threads += 1
+                        except queue.Empty:
+                            break
+
+                    time.sleep(0.1)  # 避免过度占用CPU
+
+                except Exception as e:
+                    logger.error(f"监控线程进度失败: {str(e)}")
+                    break
+
+            # 等待所有线程完成
+            for thread in threads:
+                thread.join(timeout=30)  # 30秒超时
 
             # 记录完成日志
             log_email_complete(email_address, "未知", len(mail_records), len(mail_records), len(mail_records))
+            logger.info(f"多线程处理完成，共获得 {len(mail_records)} 封邮件")
 
             return mail_records
 
@@ -346,6 +459,11 @@ class IMAPMailHandler:
                     progress_callback(0, "没有找到新邮件")
                 return {'success': False, 'message': '没有找到新邮件'}
 
+            # 循环打印 has_attachments 和 full_attachments
+            # for idx, record in enumerate(mail_records):
+            #     has_attachments = record.get("has_attachments", False)
+            #     full_attachments = record.get("full_attachments", [])
+            #     logger.info(f"[MailRecord {idx}] subject: {record.get('subject')[:30]}, has_attachments: {has_attachments}, full_attachments: {len(full_attachments)}")
             # 保存邮件记录
             saved_count = db.save_mail_records(email_info['id'], mail_records, progress_callback)
 
