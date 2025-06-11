@@ -18,6 +18,7 @@ import traceback
 from typing import List, Dict, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
+import json
 
 from .common import (
     decode_mime_words,
@@ -464,8 +465,12 @@ class IMAPMailHandler:
             #     has_attachments = record.get("has_attachments", False)
             #     full_attachments = record.get("full_attachments", [])
             #     logger.info(f"[MailRecord {idx}] subject: {record.get('subject')[:30]}, has_attachments: {has_attachments}, full_attachments: {len(full_attachments)}")
-            # 保存邮件记录
-            saved_count = db.save_mail_records(email_info['id'], mail_records, progress_callback)
+            
+            # 导入 MailProcessor 以使用其 save_mail_records 方法
+            from .mail_processor import MailProcessor
+            
+            # 保存邮件记录 - 使用 MailProcessor 的方法以支持附件处理
+            saved_count = MailProcessor.save_mail_records(db, email_info['id'], mail_records, progress_callback)
 
             if progress_callback:
                 progress_callback(100, f"成功获取 {len(mail_records)} 封邮件，新增 {saved_count} 封")

@@ -93,7 +93,7 @@ class MailProcessor:
                 progress_callback(progress, progress_message)
                 
                 # 每10封或最后一封记录进度
-                if processed_count[0] % 10 == 0 or processed_count[0] == total:
+                if processed_count[0] % 20 == 0 or processed_count[0] == total:
                     log_progress(email_id, progress, progress_message)
 
         def process_single_record(record_data):

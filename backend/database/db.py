@@ -908,7 +908,7 @@ class Database:
 
                 if not existing:
                     # 保存新邮件记录
-                    logger.debug(f"保存新邮件记录: '{subject[:30]}...'")
+                    logger.debug(f"保存新邮件记录: '{subject[:30]}...' has_attachments: {record.get('has_attachments')}")
 
                     success = self.add_mail_record(
                         email_id=email_id,
@@ -916,7 +916,8 @@ class Database:
                         sender=sender,
                         content=record.get("content", "(无内容)"),
                         received_time=record.get("received_time", datetime.now()),
-                        folder=record.get("folder", "INBOX")
+                        folder=record.get("folder", "INBOX"),
+                        has_attachments=record.get("has_attachments", 0),
                     )
 
                     if success:

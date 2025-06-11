@@ -5,6 +5,8 @@ import threading
 import argparse
 import datetime
 import jwt
+import time
+import traceback
 from functools import wraps
 from flask import Flask, send_from_directory, jsonify, request, Response, make_response
 from flask_cors import CORS
@@ -13,6 +15,7 @@ from utils.email import EmailBatchProcessor
 from ws_server.handler import WebSocketHandler
 import asyncio
 import concurrent.futures
+import urllib.parse
 
 # 配置日志
 logging.basicConfig(
@@ -744,9 +747,27 @@ def download_attachment(current_user, attachment_id):
         content_type = attachment['content_type']
         content = attachment['content']
 
+        # 处理文件名编码，确保兼容性
+        # 使用ASCII安全的fallback文件名
+        safe_filename = "attachment.pdf"  # 默认安全文件名
+        try:
+            # 尝试获取文件扩展名
+            _, ext = os.path.splitext(filename)
+            if ext:
+                safe_filename = f"attachment{ext}"
+        except:
+            pass
+        
+        # 对原始文件名进行URL编码 (RFC 5987)
+        encoded_filename = urllib.parse.quote(filename.encode('utf-8'))
+
         response = make_response(content)
         response.headers['Content-Type'] = content_type
-        response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        # 同时设置fallback filename和RFC 5987格式的filename*
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename="{safe_filename}"; '
+            f'filename*=UTF-8\'\'{encoded_filename}'
+        )
 
         return response
     except Exception as e:
