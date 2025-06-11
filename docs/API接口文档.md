@@ -429,6 +429,61 @@
   }
   ```
 
+### 获取邮件记录（简化版）
+
+- **URL**: `/api/emails/<email_id>/mail_records_lite/<limit>`
+- **方法**: `GET`
+- **描述**: 获取指定邮箱的邮件记录（简化版本，限制数量和字段）
+- **权限**: 需要认证
+- **路径参数**:
+  - `email_id`: 邮箱ID
+  - `limit`: 返回记录数量限制（1-1000）
+- **特点**:
+  - 只返回必要的字段，提高性能
+  - 可限制返回数量，适合分页显示
+  - 智能提取邮件内容的纯文本部分
+- **成功响应** (200):
+  ```json
+  [
+    {
+      "id": 1,
+      "plain_text": "这是邮件的纯文本内容...",
+      "sender": "sender@example.com",
+      "subject": "测试邮件",
+      "has_attachments": 1,
+      "folder": "INBOX"
+    },
+    {
+      "id": 2,
+      "plain_text": "这是另一封邮件的纯文本内容...",
+      "sender": "important@example.com",
+      "subject": "重要通知",
+      "has_attachments": 0,
+      "folder": "INBOX"
+    }
+  ]
+  ```
+- **错误响应** (400):
+  ```json
+  {
+    "error": "limit参数必须大于0"
+  }
+  ```
+- **错误响应** (404):
+  ```json
+  {
+    "error": "邮箱 ID 1 不存在或您没有权限"
+  }
+  ```
+- **使用示例**:
+  ```bash
+  # 获取邮箱ID为1的最新50封邮件的简化信息
+  GET /api/emails/1/mail_records_lite/50
+  
+  # 获取邮箱ID为2的最新10封邮件的简化信息
+  GET /api/emails/2/mail_records_lite/10
+  ```
+
 ### 导入邮箱
 
 - **URL**: `/api/emails/import`

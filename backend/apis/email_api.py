@@ -298,7 +298,7 @@ def fetch_emails(email_id):
             return jsonify({'success': False, 'message': '邮箱不存在'}), 404
         
         folder = request.args.get('folder', 'INBOX')
-        limit = request.args.get('limit', 100, type=int)
+        limit = request.args.get('limit', 50, type=int)
         
         # 连接IMAP服务器
         handler = IMAPMailHandler(

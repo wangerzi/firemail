@@ -80,7 +80,7 @@ class OutlookMailHandler:
             logger.error(f"获取Outlook文件夹列表失败: {e}")
             return ['inbox']
 
-    def get_messages(self, folder="inbox", limit=100):
+    def get_messages(self, folder="inbox", limit=50):
         """获取指定文件夹的邮件"""
         if not self.mail:
             return []
@@ -233,7 +233,7 @@ class OutlookMailHandler:
                     logger.info(f"搜索{search_date}之后的邮件")
                     status, data = mail.search(None, search_cmd)
                 else:
-                    # 获取最近的100封邮件
+                    # 获取最近的200封邮件
                     status, data = mail.search(None, 'ALL')
 
                 if status != 'OK':
@@ -243,8 +243,8 @@ class OutlookMailHandler:
                 # 获取所有邮件ID
                 mail_ids = data[0].split()
 
-                # 只处理最近的100封邮件
-                mail_ids = mail_ids[-100:] if len(mail_ids) > 100 else mail_ids
+                # 只处理最近的200封邮件
+                mail_ids = mail_ids[-200:] if len(mail_ids) > 200 else mail_ids
 
                 total_mails = len(mail_ids)
                 logger.info(f"找到{total_mails}封邮件")

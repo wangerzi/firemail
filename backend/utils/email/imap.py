@@ -126,7 +126,7 @@ class IMAPMailHandler:
             logger.error(f"获取文件夹列表失败: {e}")
             return ['INBOX']
 
-    def get_messages(self, folder="INBOX", limit=100):
+    def get_messages(self, folder="INBOX", limit=50):
         """获取指定文件夹的邮件"""
         if not self.mail:
             return []

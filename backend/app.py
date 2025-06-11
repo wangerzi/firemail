@@ -640,6 +640,61 @@ def get_mail_records(current_user, email_id):
     mail_records = db.get_mail_records(email_id)
     return jsonify([dict(record) for record in mail_records])
 
+@app.route('/api/emails/<int:email_id>/mail_records_lite/<int:limit>', methods=['GET'])
+@token_required
+def get_mail_records_lite(current_user, email_id, limit):
+    """获取指定邮箱的邮件记录（简化版本，限制数量和字段）"""
+    try:
+        # 获取邮箱信息，验证权限
+        email_info = db.get_email_by_id(email_id, None if current_user['is_admin'] else current_user['id'])
+        if not email_info:
+            return jsonify({'error': f'邮箱 ID {email_id} 不存在或您没有权限'}), 404
+
+        # 验证limit参数
+        if limit <= 0:
+            return jsonify({'error': 'limit参数必须大于0'}), 400
+        
+        # 限制最大返回数量，防止过大的查询
+        if limit > 1000:
+            limit = 1000
+
+        # 获取邮件记录
+        mail_records = db.get_mail_records(email_id)
+        
+        # 限制数量（取最新的N条记录）
+        limited_records = mail_records[:limit]
+        
+        # 只返回指定的字段
+        lite_records = []
+        for record in limited_records:
+            # 提取content中的plain_text，如果content是字典类型
+            plain_text = ""
+            real_content = ""
+            content = record.get('content', '')
+            
+            if isinstance(content, dict):
+                plain_text = content.get('plain_text', content.get('text', ''))
+                real_content = content.get('content', '')
+            elif isinstance(content, str):
+                plain_text = content
+            
+            lite_record = {
+                'id': record.get('id'),
+                'plain_text': plain_text,
+                # 'content': real_content,
+                'sender': record.get('sender'),
+                'subject': record.get('subject'),
+                'has_attachments': record.get('has_attachments', 0),
+                'folder': record.get('folder')
+            }
+            lite_records.append(lite_record)
+        
+        return jsonify(lite_records)
+        
+    except Exception as e:
+        logger.error(f"获取简化邮件记录失败: {str(e)}")
+        return jsonify({'error': f'服务器错误: {str(e)}'}), 500
+
 @app.route('/api/mail_records/<int:mail_id>/attachments', methods=['GET'])
 @token_required
 def get_mail_attachments(current_user, mail_id):
@@ -1020,8 +1075,8 @@ def start_real_time_check():
     """启动实时邮件检查"""
     try:
         check_interval = request.json.get('check_interval', 60)
-        if check_interval < 30:  # 最小检查间隔为30秒
-            check_interval = 30
+        if check_interval < 60:  # 最小检查间隔为60秒
+            check_interval = 60
 
         success = email_processor.start_real_time_check(check_interval)
         if success:
@@ -1156,7 +1211,7 @@ if __name__ == '__main__':
         ws_thread.start()
 
         # 启动实时邮件检查
-        email_processor.start_real_time_check(check_interval=60)
+        email_processor.start_real_time_check(check_interval=120)
         logger.info("实时邮件检查已启动")
 
         # 启动Flask应用
